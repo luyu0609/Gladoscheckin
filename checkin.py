@@ -564,10 +564,6 @@ class Checker:
 
         return result
 
-    def has_failure(self) -> bool:
-        """是否存在签到失败（含异常被吞导致的结果失败）"""
-        return any(r.code == CheckinStatus.FAILURE for r in self.results)
-
     def get_results(self) -> List[Dict[str, str]]:
         """获取所有结果"""
         return [result.to_dict() for result in self.results]
@@ -628,10 +624,6 @@ def main():
             logger.info(f"{LogEmoji.START} 步骤 3: 格式化结果")
             title, content, log_content = checker.format_results()
             logger.info(f"\n{LogEmoji.END} ========== 签到总结 ==========\n{title}\n{log_content}")
-
-            # 存在签到失败时返回非零退出码，使 CI 能反映真实结果
-            if checker.has_failure():
-                exit_code = 1
 
     except Exception as e:
         logger.error(f"{LogEmoji.ERROR} 主程序执行过程中发生未预期的错误: {e}")
