@@ -1,13 +1,14 @@
-import requests
-import json
 import os
-import logging
+import sys
+from dataclasses import asdict, dataclass
 from enum import Enum
 from typing import Dict, List, Optional, Tuple, Union
-from dataclasses import dataclass, asdict
+
+import requests
 from pypushdeer import PushDeer
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+
 from logging_config import init_logger
 
 
@@ -51,9 +52,9 @@ class LogEmoji:
     END = "🏁"
     COOKIE = "🍪"
     DOMAIN = "🌐"
-    WARNING = "⚠️ "
+    WARNING = "⚠️"
     ERROR = "🔴"
-    INFO = "ℹ️ "
+    INFO = "ℹ️"
 
 
 def log_method(func):
@@ -241,7 +242,8 @@ class API:
     def _log(self, level: str, emoji: str, message: str, force: bool = False) -> None:
         """统一日志输出方法"""
 
-        log_message = f"{LogEmoji.COOKIE}[{self.cookie_index}] {LogEmoji.DOMAIN}[{self.domain}] {emoji} {message}"
+        prefix = f"{LogEmoji.COOKIE}[{self.cookie_index}] {LogEmoji.DOMAIN}[{self.domain}]"
+        log_message = f"{prefix} {emoji} {message}"
 
         if force or self.verbose:
             if level == "info":
@@ -355,7 +357,21 @@ class API:
             result["points"] = "0"
             result["message"] = message
         else:
-            self._log("info", LogEmoji.FAIL, f"{{ code : {code}, message : {message} }}", force=True)
+            # 失败分支：按 code 细分诊断，便于快速定位根因
+            if code == 4:
+                reason = raw.get("reason")
+                if reason == "device-mismatch":
+                    login_device = raw.get("loginDevice") or "未知"
+                    if login_device in PLATFORM_UA:
+                        self._log("error", LogEmoji.ERROR, f"设备平台不匹配(loginDevice={login_device})，重试后仍失败，请确认登录设备平台", force=True)
+                    else:
+                        self._log("error", LogEmoji.ERROR, f"设备平台不匹配(loginDevice={login_device} 不在支持列表)，无法自动切换 UA；请提交相关截图到本项目 issue 以便作者更新设备列表", force=True)
+                else:
+                    self._log("error", LogEmoji.ERROR, f"服务端拒绝签到(code=4, reason={reason})，请检查账户风控状态", force=True)
+            elif code == -2:
+                self._log("error", LogEmoji.ERROR, f"无权限(code=-2)：Cookie 可能已失效，请重新登录 {self.domain} 刷新 Cookie 并更新仓库 Secret GLADOS_COOKIES 后重试", force=True)
+            else:
+                self._log("error", LogEmoji.ERROR, f"未预期响应(code={code}, message={message})，请检查 GLaDOS 服务状态或 Cookie", force=True)
             result["code"] = CheckinStatus.FAILURE
             result["status"] = "签到失败"
             result["points"] = "0"
@@ -380,10 +396,10 @@ class API:
                 self._log("info", LogEmoji.SUCCESS, f"{{ code : {code}, leftDays : {left_days_int} 天}}")
                 return f"{left_days_int} 天", code
             else:
-                self._log("info", LogEmoji.FAIL, f"{{ code : {code}, leftDays : {left_days} 天}}", force=True)
+                self._log("info", LogEmoji.FAIL, f"{{ code : {code}, leftDays : {left_days} 天}}")
                 return "None 天", code
         else:
-            self._log("warning", LogEmoji.WARNING, "获取状态失败", force=True)
+            self._log("warning", LogEmoji.WARNING, "获取状态失败")
             return "None 天", -2
 
     @log_method
@@ -404,10 +420,10 @@ class API:
                 points_num = points_int
                 return points_str, points_num
             else:
-                self._log("info", LogEmoji.FAIL, f"{{ code : {code}, points : {points} 积分}}", force=True)
+                self._log("info", LogEmoji.FAIL, f"{{ code : {code}, points : {points} 积分}}")
                 return "None 积分", 0
         else:
-            self._log("warning", LogEmoji.WARNING, "获取积分失败", force=True)
+            self._log("warning", LogEmoji.WARNING, "获取积分失败")
             return "None 积分", 0
 
     @log_method
@@ -458,7 +474,7 @@ class PushService:
 
     def send(self, title: str, content: str) -> bool:
         """发送推送"""
-        if not self.config.push_key:
+        if not self.config or not getattr(self.config, "push_key", ""):
             logger.info(f"{LogEmoji.WARNING} 未设置推送密钥，跳过推送通知。")
             return False
 
@@ -544,9 +560,13 @@ class Checker:
                 result.exchange = api.exchange(cookie, self.config.exchange_plan, required_points)
             else:
                 result.exchange = "未配置兑换计划，跳过自动兑换"
-                self._log(cookie_idx, domain, LogEmoji.INFO, "未配置兑换计划，跳过自动兑换", force=True)
+                self._log(cookie_idx, domain, LogEmoji.INFO, "未配置兑换计划，跳过自动兑换")
 
         return result
+
+    def has_failure(self) -> bool:
+        """是否存在签到失败（含异常被吞导致的结果失败）"""
+        return any(r.code == CheckinStatus.FAILURE for r in self.results)
 
     def get_results(self) -> List[Dict[str, str]]:
         """获取所有结果"""
@@ -560,19 +580,23 @@ class Checker:
         repeat_count = sum(1 for r in results if r["code"] == CheckinStatus.REPEAT)
         fail_count = sum(1 for r in results if r["code"] == CheckinStatus.FAILURE)
 
-        title = f"GLaDOS 签到, 成功{success_count}, 失败{fail_count}, 重复{repeat_count}"
+        status_emoji_map = {
+            CheckinStatus.SUCCESS: LogEmoji.SUCCESS,
+            CheckinStatus.REPEAT: LogEmoji.REPEAT,
+            CheckinStatus.FAILURE: LogEmoji.ERROR,
+        }
+        title = f"GLaDOS 签到 · 成功 {success_count} · 失败 {fail_count} · 重复 {repeat_count}"
 
         send_content_lines = []
         log_content_lines = []
         for i, res in enumerate(results, 1):
-            line = f"#{i} P:{res['points']} 剩余:{res['days']} 总积分:{res['points_total']} | {res['status']} | {res['exchange']}"
-            send_content_lines.append(line)
-
-            if self.config.verbose:
-                log_line = line
-            else:
-                log_line = f"#{i} {res['status']}"
+            emoji = status_emoji_map.get(res["code"], LogEmoji.ERROR)
+            domain = res["domain"]
+            detail = f"获得 {res['points']} 积分 · 剩余 {res['days']} · 总 {res['points_total']} · {res['exchange']}"
+            log_line = f"#{i:<2}  {emoji} {res['status']:<6}  {domain:<13}  {detail if self.config.verbose else ''}".rstrip()
             log_content_lines.append(log_line)
+            send_line = f"#{i:<2}  {emoji} {res['status']:<6}  {domain:<13}  {detail}"
+            send_content_lines.append(send_line)
 
         content = "\n".join(send_content_lines)
         log_content = "\n".join(log_content_lines)
@@ -585,6 +609,7 @@ logger = init_logger()
 
 def main():
     """主函数"""
+    exit_code = 0
     try:
         # 1. 加载配置
         logger.info(f"{LogEmoji.START} 步骤 1: 加载配置")
@@ -602,17 +627,25 @@ def main():
             # 3. 格式化结果
             logger.info(f"{LogEmoji.START} 步骤 3: 格式化结果")
             title, content, log_content = checker.format_results()
-            logger.info(f"\n{LogEmoji.END}========== 签到总结 ==========\n{title}\n{log_content}")
+            logger.info(f"\n{LogEmoji.END} ========== 签到总结 ==========\n{title}\n{log_content}")
+
+            # 存在签到失败时返回非零退出码，使 CI 能反映真实结果
+            if checker.has_failure():
+                exit_code = 1
 
     except Exception as e:
         logger.error(f"{LogEmoji.ERROR} 主程序执行过程中发生未预期的错误: {e}")
-        title, content, log_content = "# 脚本执行出错", str(e), str(e)
+        title, content = "# 脚本执行出错", str(e)
+        exit_code = 1
 
     # 4. 发送推送
     logger.info(f"{LogEmoji.START} 步骤 4: 发送推送")
-    push_service = PushService(config if "config" in locals() else "")
+    push_service = PushService(config if "config" in locals() else None)
     push_service.send(title, content)
     logger.info(f"{LogEmoji.END} 签到完成")
+
+    if exit_code != 0:
+        sys.exit(exit_code)
 
 
 if __name__ == "__main__":

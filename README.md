@@ -55,24 +55,26 @@
 ## 文件结构
 
 ```shell
-│  checkin.py	# 签到脚本
+│  checkin.py          # 签到主脚本
+│  logging_config.py   # 日志配置（北京时间、[I/W/E] 短标签）
 │
 ├─.github
 │  └─workflows
-│          gladosCheck.yml	# Actions 配置文件
+│          gladosCheck.yml   # Actions 配置文件
 ```
 
 ## 更新日志
 
 - **2026-01**: 重构代码，添加log输出方便定位，支持新版网址，支持配置积分兑换策略。
 - **2026-04**: 优化代码逻辑，优化日志输出，支持[新版域名](https://railgun.info) ，在 GLADOS_COOKIES 中添加新版域名下的 cookies 即可使用。
-- **2026-09**: 新增设备平台自适应重试（code 4 无需手动配置 UA 即可自动恢复）；默认关闭自动兑换，需显式配置 `GLADOS_EXCHANGE_PLAN` 才启用。
-- **2026-09**: 新增网络层重试/退避：`requests.Session` 挂载 `HTTPAdapter` + `urllib3.Retry`（total=3、指数退避 1/2/4s、对 429/5xx 自动重试），降低 CI 网络抖动导致的误报失败；业务 200 响应不受影响。
+- **2026-09**: 支持设备平台自适应重试（无需手动配置 UA 即可自动恢复签到），并默认关闭自动兑换，需显式配置后才启用。
+- **2026-09**: 增加网络层自动重试与退避，降低 CI 网络抖动导致的误报失败。
+- **2026-09**: 日志时间统一为北京时间，定时任务调整为北京时间每天 2 次并避开整点高峰。
+- **2026-10**: 优化日志显示。
 
 
 ## 问题排查与定位
 - 大家可以通过查询 actions 中的 running checkin 日志快速定位问题，有其他问题提交issue。
-- 若日志出现 `code : 4, message : Automated check-in detected`：这是 GLaDOS 的**设备平台校验**（`reason=device-mismatch`，即签到请求 UA 平台与登录设备平台不一致）。脚本已内置**设备平台自适应**：首次失败时自动读取服务端返回的 `loginDevice` 并切换对应平台 UA 重试，**无需手动配置 User-Agent**；若长期仍失败，请重新登录 glados.cloud 手动签到一次并刷新 cookie。
 
   <img width="1684" height="844" alt="image" src="https://github.com/user-attachments/assets/45348a5f-43e4-45f5-8fdf-ce84d343b30d" />
 
